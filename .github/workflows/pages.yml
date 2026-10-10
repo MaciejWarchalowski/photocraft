@@ -1,0 +1,77 @@
+name: Web (GitHub Pages)
+
+# Builds the browser version (apps/photocraft-web, Trunk + wasm32) and publishes it to GitHub Pages.
+# One-time setup: Settings › Pages › Build and deployment › Source = "GitHub Actions".
+#
+# The site works under the repository sub-path (https://<owner>.github.io/<repo>/) as-is: every URL
+# in index.html is relative (public_url = "./" in Trunk.toml), and package.sh fails the build if one
+# isn't. Pages serves .wasm as application/wasm and compresses it, which is all the app needs
+# (packaging/web/README.md › Required server settings). Pages' 100 MiB per-file cap is well above
+# package.sh's own 24 MiB wasm gate.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "book/**"
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push waits rather than cancelling one that's mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same pin as release.yml's web job; bump both together.
+  TRUNK_VERSION: 0.21.14
+
+jobs:
+  build:
+    name: Build web (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pages-web
+      - name: Install trunk
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin" trunk
+          trunk --version
+      # package.sh runs `trunk build --release` (wasm-release profile, heif, wasm-opt -Oz), stamps the
+      # About dialog with the commit and date, and enforces the relative-URL and wasm size gates.
+      # The site itself lands in dist/web; the zip it also writes is not used here.
+      - name: Build
+        run: packaging/web/package.sh
+      - name: Prepare site
+        run: |
+          touch dist/web/.nojekyll
+          ls -la dist/web
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
