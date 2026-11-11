@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::adjust::CurvePoint;
 
+/// The range of a style's pattern scale as a fraction (1 = 100 %): Pattern Overlay, a pattern
+/// Stroke and the Bevel & Emboss Texture all take 1..1000 % in the Layer Style dialog.
+pub const PATTERN_SCALE_RANGE: (f32, f32) = (0.01, 10.0);
+
 /// Gradient geometry (fill layers, gradient overlays, gradient strokes).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GradientStyle {
@@ -37,6 +41,16 @@ pub struct Gradient {
     pub offset: (f32, f32),
 }
 
+/// Editable colour stops behind a Gradient Overlay's baked render stops.
+/// Older documents have no interpolation record and keep their existing appearance.
+/// Writers must rebake `gradient.stops` from this record, or clear it when replacing the curve.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientInterpolation {
+    pub method: String,
+    pub smoothness: f32,
+    pub stops: Vec<(f32, Color)>,
+}
+
 impl Default for Gradient {
     fn default() -> Self {
         Gradient {
@@ -58,7 +72,24 @@ pub enum Contour {
     #[default]
     Linear,
     /// Custom curve (input → output), both `0..=1`.
-    Custom { name: String, points: Vec<CurvePoint> },
+    Custom {
+        name: String,
+        points: Vec<CurvePoint>,
+        /// Corner (non-continuous) flags, parallel to `points`: the curve bends sharply at a
+        /// corner point instead of passing smoothly through it. Missing entries are smooth.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        corners: Vec<bool>,
+    },
+}
+
+impl Contour {
+    /// Whether point `i` of a custom contour is a corner.
+    pub fn is_corner(&self, i: usize) -> bool {
+        match self {
+            Contour::Linear => false,
+            Contour::Custom { corners, .. } => corners.get(i).copied().unwrap_or(false),
+        }
+    }
 }
 
 /// Paint used by strokes and glows.
@@ -149,6 +180,9 @@ pub struct StrokeFx {
     pub size: f32,
     pub position: StrokePosition,
     pub paint: FxPaint,
+    /// Overprint (PSD `overprint`).
+    #[serde(default)]
+    pub overprint: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -196,6 +230,9 @@ pub struct Bevel {
     pub altitude: f32,
     pub use_global_light: bool,
     pub gloss_contour: Contour,
+    /// Gloss Contour › Anti-aliased (PSD `antialiasGloss`).
+    #[serde(default)]
+    pub gloss_anti_alias: bool,
     pub highlight: FxCommon,
     pub highlight_color: Color,
     pub shadow: FxCommon,
@@ -255,6 +292,8 @@ pub enum Effect {
         common: FxCommon,
         gradient: Gradient,
         dither: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interpolation: Option<GradientInterpolation>,
     },
     PatternOverlay {
         common: FxCommon,
@@ -290,7 +329,12 @@ impl Effect {
             Effect::OuterGlow(g) | Effect::InnerGlow(g) => paint(&mut g.paint),
             Effect::Stroke(s) => paint(&mut s.paint),
             Effect::ColorOverlay { color, .. } => cc(color),
-            Effect::GradientOverlay { gradient, .. } => gradient.stops.iter_mut().for_each(|s| cc(&mut s.1)),
+            Effect::GradientOverlay { gradient, interpolation, .. } => {
+                gradient.stops.iter_mut().for_each(|s| cc(&mut s.1));
+                if let Some(source) = interpolation {
+                    source.stops.iter_mut().for_each(|s| cc(&mut s.1));
+                }
+            }
             Effect::Satin(s) => cc(&mut s.color),
             Effect::BevelEmboss(b) => {
                 cc(&mut b.highlight_color);
