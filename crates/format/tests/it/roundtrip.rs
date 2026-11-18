@@ -293,6 +293,26 @@ fn gradient_overlay_interpolation_roundtrips_in_native_documents() {
     }
 }
 
+/// #8351: a Gradient Map layer keeps Photoshop's own gradient (stops, midpoints, Smoothness,
+/// method) through a native save, and a file without one still loads.
+#[test]
+fn gradient_map_source_roundtrips_in_native_documents() {
+    use photocraft_doc::Adjustment;
+    use photocraft_doc::adjust::GradientSource;
+    let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let source =
+        GradientSource { stops: vec![(0.0, [0.1, 0.2, 0.6]), (1.0, [1.0, 0.8, 0.2])], midpoints: vec![0.3], smoothness: 0.8, method: "perceptual".into() };
+    let map = Adjustment::GradientMap {
+        stops: vec![(0.0, [0.1, 0.2, 0.6]), (0.5, [0.7, 0.4, 0.4]), (1.0, [1.0, 0.8, 0.2])],
+        reverse: false,
+        dither: true,
+        source: Some(source),
+    };
+    doc.insert_above(None, Layer::new("map", LayerContent::Adjustment(map)));
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    assert_eq!(load_from_bytes(&bytes).unwrap(), doc);
+}
+
 #[test]
 fn old_effect_snapshots_need_no_interpolation_record() {
     let effect = photocraft_doc::Effect::GradientOverlay {
@@ -668,6 +688,9 @@ fn directory_save_rejects_manifest_symlink_without_overwriting_target() {
 
     let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let dir = temp_dir("symlink-manifest");
+    // The fixture inspects this directory even when preflight refuses the save before any
+    // object is written; empty bundles no longer create object directories eagerly.
+    std::fs::create_dir(dir.join("tiles")).unwrap();
     let outside = temp_dir("symlink-manifest-outside");
     let external_manifest = outside.join("external.json");
     std::fs::write(&external_manifest, b"keep manifest").unwrap();
@@ -675,7 +698,8 @@ fn directory_save_rejects_manifest_symlink_without_overwriting_target() {
 
     assert!(PcraftWriter::new().save_dir(&doc, &dir, &SaveOptions::default()).is_err());
     assert_eq!(std::fs::read(&external_manifest).unwrap(), b"keep manifest");
-    assert_eq!(std::fs::read_dir(dir.join("tiles")).unwrap().count(), 0);
+    // Refused before any object is written: `tiles/` is missing or empty.
+    assert_eq!(std::fs::read_dir(dir.join("tiles")).map_or(0, |entries| entries.count()), 0);
 
     std::fs::remove_dir_all(dir).unwrap();
     std::fs::remove_dir_all(outside).unwrap();
@@ -785,7 +809,8 @@ fn bundles_without_the_full_composite_still_open() {
     }
     let older = z.finish().unwrap();
     assert_eq!(read_full_composite(&older).unwrap(), None);
-    // A member that names any other entry is refused, and the document still opens.
+    // A member that names any other entry is refused, and so is the bundle: craft-pcraft-format
+    // treats it like a `thumbnail` or `composite` that names another entry. No writer does that.
     manifest["full_composite"] = serde_json::Value::from("thumb.png");
     let mut z = zip::ZipWriter::new();
     z.add("manifest.json", &serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
@@ -794,7 +819,7 @@ fn bundles_without_the_full_composite_still_open() {
     }
     let other = z.finish().unwrap();
     assert!(read_full_composite(&other).is_err());
-    assert_eq!(load_from_bytes(&other).unwrap(), doc);
+    assert!(matches!(load_from_bytes(&other), Err(FormatError::Corrupt(_))));
     assert_eq!(load_from_bytes(&older).unwrap(), load_from_bytes(&bytes).unwrap());
     assert_eq!(load_from_bytes(&older).unwrap(), doc);
     // A save without it writes no member at all, as older writers did.
